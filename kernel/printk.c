@@ -1221,7 +1221,7 @@ void panic_console(void)
 		resume_console();
 }
 
-static void __cpuinit console_flush(struct work_struct *work)
+static void console_flush(struct work_struct *work)
 {
 	console_lock();
 	console_unlock();
@@ -1243,7 +1243,7 @@ static __cpuinitdata DECLARE_WORK(console_cpu_notify_work, console_flush);
  * Special handling must be done for cases invoked from an atomic context,
  * as we can't be taking the console semaphore here.
  */
-static int __cpuinit console_cpu_notify(struct notifier_block *self,
+static int console_cpu_notify(struct notifier_block *self,
 	unsigned long action, void *hcpu)
 {
 	switch (action) {

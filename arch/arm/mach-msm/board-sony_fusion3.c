@@ -30,6 +30,7 @@
 #include <linux/msm_ion.h>
 #include <linux/memory.h>
 #include <linux/memblock.h>
+#include <linux/msm_thermal.h>
 #include <linux/i2c/atmel_mxt_ts.h>
 #include <linux/i2c/isa1200.h>
 #include <linux/gpio_keys.h>
@@ -3234,6 +3235,24 @@ static struct platform_device msm_tsens_device = {
 	.id = -1,
 };
 
+static struct msm_thermal_data msm_thermal_pdata = {
+	.sensor_id = 7,
+	.poll_ms = 250,
+	.shutdown_temp = 78,
+
+	.allowed_max_high = 75,
+	.allowed_max_low = 70,
+	.allowed_max_freq = 384000,
+
+	.allowed_mid_high = 70,
+	.allowed_mid_low = 65,
+	.allowed_mid_freq = 810000,
+
+	.allowed_low_high = 65,
+	.allowed_low_low = 60,
+	.allowed_low_freq = 1350000,
+};
+
 #define MSM_SHARED_RAM_PHYS 0x80000000
 static void __init apq8064_map_io(void)
 {
@@ -4475,6 +4494,7 @@ static void __init apq8064_common_init(void)
 	msm_spm_init(msm_spm_data, ARRAY_SIZE(msm_spm_data));
 	msm_spm_l2_init(msm_spm_l2_data);
 	msm_tsens_early_init(&apq_tsens_pdata);
+	msm_thermal_init(&msm_thermal_pdata);
 	if (socinfo_init() < 0)
 		pr_err("socinfo_init() failed!\n");
 	BUG_ON(msm_rpm_init(&apq8064_rpm_data));

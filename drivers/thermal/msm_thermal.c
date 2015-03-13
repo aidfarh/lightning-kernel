@@ -32,7 +32,7 @@
 static DEFINE_MUTEX(emergency_shutdown_mutex);
 
 /* Throttling indicator, default: not throttled, 1=low, 2=mid, 3=max */
-static unsigned int thermal_throttled;
+unsigned int thermal_throttled;
 
 /* Save the cpu max freq before throttling */
 static unsigned int pre_throttled_max;

@@ -42,7 +42,7 @@ static struct delayed_work check_temp_work;
 static struct workqueue_struct *check_temp_workq;
 
 static int update_cpu_max_freq(struct cpufreq_policy *cpu_policy,
-							int cpu, int max_freq)
+				int cpu, int max_freq)
 {
 	int ret = 0;
 
@@ -67,6 +67,7 @@ static void check_temp(struct work_struct *work)
 	int cpu = 0, i = 0, ret = 0;
 
 	tsens_dev.sensor_num = msm_thermal_info.sensor_id;
+
 	ret = tsens_get_temp(&tsens_dev, &temp);
 	if (ret) {
 		pr_err("Failed to read TSENS sensor data\n");
@@ -76,15 +77,17 @@ static void check_temp(struct work_struct *work)
 	if (temp >= msm_thermal_info.shutdown_temp) {
 		mutex_lock(&emergency_shutdown_mutex);
 		pr_warn("Emergency Shutdown!\n");
+
 		/* orderly poweroff tries to power down gracefully
 		if it fails it will force it. */
 		orderly_poweroff(true);
+
 		for_each_possible_cpu(cpu) {
-		update_policy = true;
-		max_freq = msm_thermal_info.allowed_max_freq;
-		thermal_throttled = 3;
+			update_policy = true;
+			max_freq = msm_thermal_info.allowed_max_freq;
+			thermal_throttled = 3;
 		}
-	mutex_unlock(&emergency_shutdown_mutex);
+		mutex_unlock(&emergency_shutdown_mutex);
 	}
 
 	for_each_possible_cpu(cpu) {
@@ -94,6 +97,7 @@ static void check_temp(struct work_struct *work)
 			pr_debug("NULL policy on cpu %d\n", cpu);
 		continue;
 	}
+
 	/* save pre-throttled max freq value */
 	if (!thermal_throttled && cpu == 0)
 		pre_throttled_max = cpu_policy->max;
@@ -104,9 +108,9 @@ static void check_temp(struct work_struct *work)
 				!thermal_throttled) {
 		update_policy = true;
 		max_freq = msm_thermal_info.allowed_low_freq;
+
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 1;
-
 	/* low clr point */
 	} else if (temp < msm_thermal_info.allowed_low_low &&
 						thermal_throttled > 0) {
@@ -116,43 +120,45 @@ static void check_temp(struct work_struct *work)
 			max_freq = CONFIG_MSM_CPU_FREQ_MAX;
 
 		update_policy = true;
+
 		for (i = 1; i < CONFIG_NR_CPUS; i++) {
 			if (cpu_online(i))
 				continue;
 			cpu_up(i);
 		}
+
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 0;
-
 	/* mid trip point */
 	} else if (temp >= msm_thermal_info.allowed_mid_high &&
 				temp < msm_thermal_info.allowed_max_high &&
 				thermal_throttled < 2) {
 		update_policy = true;
 		max_freq = msm_thermal_info.allowed_mid_freq;
+
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 2;
-
 	/* mid clr point */
 	} else if (temp < msm_thermal_info.allowed_mid_low &&
 						thermal_throttled > 1) {
 		max_freq = msm_thermal_info.allowed_low_freq;
 		update_policy = true;
+
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 1;
-
 	/* max trip point */
 	} else if (temp >= msm_thermal_info.allowed_max_high) {
 		update_policy = true;
 		max_freq = msm_thermal_info.allowed_max_freq;
+
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 3;
-
 	/* max clr point */
 	} else if (temp < msm_thermal_info.allowed_max_low &&
 						thermal_throttled > 2) {
 		max_freq = msm_thermal_info.allowed_mid_freq;
 		update_policy = true;
+
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 2;
 	}
@@ -177,7 +183,7 @@ struct kobject *msm_thermal_kobject;
 static ssize_t show_##file_name					\
 (struct kobject *kobj, struct attribute *attr, char *buf)	\
 {								\
-	return sprintf(buf, "%u\n", msm_thermal_info.object);	\
+	return snprintf(buf, PAGE_SIZE, "%u\n", msm_thermal_info.object);	\
 }
 
 show_one(shutdown_temp, shutdown_temp);
@@ -430,6 +436,7 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	struct msm_thermal_data data;
 
 	memset(&data, 0, sizeof(struct msm_thermal_data));
+
 	key = "qcom,sensor-id";
 	ret = of_property_read_u32(node, key, &data.sensor_id);
 	if (ret)
@@ -450,10 +457,12 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(node, key, &data.allowed_max_high);
 	if (ret)
 		goto fail;
+
 	key = "qcom,allowed_max_low";
 	ret = of_property_read_u32(node, key, &data.allowed_max_low);
 	if (ret)
 		goto fail;
+
 	key = "qcom,allowed_max_freq";
 	ret = of_property_read_u32(node, key, &data.allowed_max_freq);
 	if (ret)
@@ -463,10 +472,12 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(node, key, &data.allowed_mid_high);
 	if (ret)
 		goto fail;
+
 	key = "qcom,allowed_mid_low";
 	ret = of_property_read_u32(node, key, &data.allowed_mid_low);
 	if (ret)
 		goto fail;
+
 	key = "qcom,allowed_mid_freq";
 	ret = of_property_read_u32(node, key, &data.allowed_mid_freq);
 	if (ret)
@@ -476,10 +487,12 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(node, key, &data.allowed_low_high);
 	if (ret)
 		goto fail;
+
 	key = "qcom,allowed_low_low";
 	ret = of_property_read_u32(node, key, &data.allowed_low_low);
 	if (ret)
 		goto fail;
+
 	key = "qcom,allowed_low_freq";
 	ret = of_property_read_u32(node, key, &data.allowed_low_freq);
 	if (ret)

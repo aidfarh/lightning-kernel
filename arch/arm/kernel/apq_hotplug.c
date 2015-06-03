@@ -54,7 +54,7 @@ static void __apq_hotplug_resume(void)
 	online_all();
 }
 
-int __cpuinit apq_hotplug_pm_notify(struct notifier_block *notify_block,
+int apq_hotplug_pm_notify(struct notifier_block *notify_block,
 					unsigned long mode, void *unused)
 {
 	switch (mode) {

@@ -26,7 +26,6 @@
 #include <linux/msm_thermal.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
-#include <linux/hrtimer.h>
 #include <mach/cpufreq.h>
 
 static DEFINE_MUTEX(emergency_shutdown_mutex);
@@ -64,7 +63,7 @@ static void check_temp(struct work_struct *work)
 	unsigned long temp = 0;
 	uint32_t max_freq = 0;
 	bool update_policy = false;
-	int cpu = 0, i = 0, ret = 0;
+	int cpu = 0, ret = 0;
 
 	tsens_dev.sensor_num = msm_thermal_info.sensor_id;
 
@@ -76,10 +75,12 @@ static void check_temp(struct work_struct *work)
 
 	if (temp >= msm_thermal_info.shutdown_temp) {
 		mutex_lock(&emergency_shutdown_mutex);
-		pr_warn("Emergency Shutdown!\n");
 
-		/* orderly poweroff tries to power down gracefully
-		if it fails it will force it. */
+		/*
+		 * orderly poweroff tries to power down gracefully,
+		 * if it fails it will force it.
+		 */
+		pr_warn("Emergency Shutdown!\n");
 		orderly_poweroff(true);
 
 		for_each_possible_cpu(cpu) {
@@ -120,12 +121,6 @@ static void check_temp(struct work_struct *work)
 			max_freq = CONFIG_MSM_CPU_FREQ_MAX;
 
 		update_policy = true;
-
-		for (i = 1; i < CONFIG_NR_CPUS; i++) {
-			if (cpu_online(i))
-				continue;
-			cpu_up(i);
-		}
 
 		if (cpu == CONFIG_NR_CPUS - 1)
 			thermal_throttled = 0;

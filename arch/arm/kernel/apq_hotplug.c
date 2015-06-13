@@ -30,14 +30,19 @@
 #include <linux/printk.h>
 #include <linux/workqueue.h>
 
-/* Note: do not release debug builds, as this will flood the log. */
+/*
+ * Remove #undef DEBUG to enable debugging of this driver.
+ * Note: do not release debug builds, as this will flood the kernel log.
+*/
 #define DEBUG
 #undef DEBUG
 
+/* Worker stuff */
 static struct workqueue_struct *apq_hotplug_wq;
 static struct delayed_work offline_all_work;
 static struct delayed_work online_all_work;
 
+/* Variables */
 static unsigned int boot_flag = 0;
 static unsigned int suspend_delay = 100;
 static unsigned int resume_delay = 10;
@@ -51,6 +56,7 @@ static inline void offline_all_fn(struct work_struct *work)
 			cpu_down(cpu);
 #ifdef DEBUG
 			pr_info("CPU%u down.\n", cpu);
+			pr_info("CPU(s) running: %u\n", num_online_cpus());
 #endif
 		}
 	}
@@ -66,6 +72,7 @@ static inline void online_all_fn(struct work_struct *work)
 		cpu_up(cpu);
 #ifdef DEBUG
 		pr_info("CPU%u up.\n", cpu);
+		pr_info("CPU(s) running: %u\n", num_online_cpus());
 #endif
 	}
 }
@@ -97,7 +104,7 @@ static void apq_hotplug_early_suspend(struct early_suspend *h)
 
 static void apq_hotplug_late_resume(struct early_suspend *h)
 {
-	/* Clear the workqueue */
+	/* Clear the workqueue and init new work */
 	cancel_delayed_work_sync(&offline_all_work);
 	flush_workqueue(apq_hotplug_wq);
 	INIT_DELAYED_WORK(&online_all_work, online_all_fn);

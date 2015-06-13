@@ -1658,7 +1658,7 @@ config SCHED_MC
 
 config APQ_HOTPLUG
 	bool "Multicore hotplug driver"
-	depends on PM
+	depends on HAS_EARLYSUSPEND
 	default y
 	help
 	  Hotplug CPUs on suspend/resume

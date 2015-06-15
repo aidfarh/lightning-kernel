@@ -16,8 +16,9 @@
  * or remove all __cpuinit's from your kernel source.
  *
  * Major Changes:
- * 20.03.15: Initial driver release
- * 12.06.15: Complete re-write
+ * Version 1.0 - 20.03.15: Initial driver release
+ * Version 1.1 - 12.06.15: Complete re-write
+ * Version 1.2 - 15.06.15: Added sysfs interface
  */
 
 #define pr_fmt(fmt) "apq_hotplug: " fmt
@@ -27,25 +28,39 @@
 #include <linux/earlysuspend.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
-#include <linux/printk.h>
+#include <linux/kobject.h>
+#include <linux/stat.h>
+#include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
+/* Driver version */
+#define APQ_HOTPLUG_MAJOR_VERSION	1
+#define APQ_HOTPLUG_MINOR_VERSION	2
+
 /*
- * Remove #undef DEBUG to enable debugging of this driver.
- * Note: do not release debug builds, as this will flood the kernel log.
-*/
+ * Driver debugging
+ * Note: do not release debug builds, as this will flood the kernel log
+ */
 #define DEBUG
 #undef DEBUG
+
+/* Definitions */
+#define BOOT_FLAG			0
+#define SUSPEND_DELAY			CONFIG_HZ
+#define RESUME_DELAY			(CONFIG_HZ / 10)
 
 /* Worker stuff */
 static struct workqueue_struct *apq_hotplug_wq;
 static struct delayed_work offline_all_work;
 static struct delayed_work online_all_work;
 
-/* Variables */
-static unsigned int boot_flag = 0;
-static unsigned int suspend_delay = 100;
-static unsigned int resume_delay = 10;
+/* Sysfs stuff */
+static struct kobject *apq_hotplug_kobj;
+
+/* Hotplug variables */
+static unsigned int boot_flag = BOOT_FLAG;
+static unsigned int suspend_delay = SUSPEND_DELAY;
+static unsigned int resume_delay = RESUME_DELAY;
 
 static inline void offline_all_fn(struct work_struct *work)
 {
@@ -94,9 +109,8 @@ static void apq_hotplug_early_suspend(struct early_suspend *h)
 	 * Set the boot_flag to zero to allow the clearing of old work
 	 * after the first suspend call.
 	 */
-	if (boot_flag) {
+	if (boot_flag)
 		--boot_flag;
-	}
 
 	queue_delayed_work(apq_hotplug_wq, &offline_all_work,
 					msecs_to_jiffies(suspend_delay));
@@ -114,18 +128,54 @@ static void apq_hotplug_late_resume(struct early_suspend *h)
 }
 
 static struct early_suspend __refdata apq_hotplug_early_suspend_handler = {
-	.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN,
+	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB,
 	.suspend = apq_hotplug_early_suspend,
 	.resume = apq_hotplug_late_resume,
 };
 
+/******************************** SYSFS START ********************************/
+static ssize_t apq_hotplug_version_show(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					char *buf)
+{
+	return sprintf(buf, "%u.%u\n", APQ_HOTPLUG_MAJOR_VERSION,
+					APQ_HOTPLUG_MINOR_VERSION);
+}
+
+static struct kobj_attribute apq_hotplug_version_attribute =
+	__ATTR(apq_hotplug_version, S_IRUGO, apq_hotplug_version_show, NULL);
+
+static struct attribute *apq_hotplug_attrs[] = {
+	&apq_hotplug_version_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group apq_hotplug_attr_group = {
+	.attrs = apq_hotplug_attrs,
+};
+/********************************* SYSFS END *********************************/
+
 static int __init apq_hotplug_init(void)
 {
+	int rc;
+
 	apq_hotplug_wq = alloc_workqueue("apq_hotplug_wq",
 					WQ_HIGHPRI | WQ_UNBOUND, 1);
 	if (!apq_hotplug_wq) {
 		pr_err("Failed to allocate apq_hotplug workqueue!\n");
 		return -ENOMEM;
+	}
+
+	apq_hotplug_kobj = kobject_create_and_add("apq_hotplug", kernel_kobj);
+	if (!apq_hotplug_kobj) {
+		pr_err("Failed to create apq_hotplug kobject!\n");
+		return -ENOMEM;
+	}
+
+	rc = sysfs_create_group(apq_hotplug_kobj, &apq_hotplug_attr_group);
+	if (rc) {
+		pr_err("Failed to create apq_hotplug sysfs entry!\n");
+		kobject_put(apq_hotplug_kobj);
 	}
 
 	register_early_suspend(&apq_hotplug_early_suspend_handler);
@@ -151,6 +201,10 @@ static void __exit apq_hotplug_exit(void)
 	cancel_delayed_work_sync(&online_all_work);
 	flush_workqueue(apq_hotplug_wq);
 	destroy_workqueue(apq_hotplug_wq);
+
+	sysfs_remove_group(apq_hotplug_kobj, &apq_hotplug_attr_group);
+	kobject_del(apq_hotplug_kobj);
+	kobject_put(apq_hotplug_kobj);
 
 	unregister_early_suspend(&apq_hotplug_early_suspend_handler);
 }

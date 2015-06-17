@@ -33,31 +33,39 @@
 #include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
-/* Driver version */
 #define APQ_HOTPLUG_MAJOR_VERSION	1
 #define APQ_HOTPLUG_MINOR_VERSION	2
 
 /*
- * Driver debugging
- * Note: do not release debug builds, as this will flood the kernel log
+ * Note: do not release debug builds, as this will flood the kernel log and
+ * cause additional overhead.
  */
-#define DEBUG
-#undef DEBUG
+#define DEBUG				0
 
-/* Definitions */
+/*
+ * Boot flag allows direct initialisation of work on the first suspend
+ * call.
+ */
 #define BOOT_FLAG			0
-#define SUSPEND_DELAY			CONFIG_HZ
+
+/*
+ * SUSPEND_DELAY prevents that CPUs get immediately offlined after a suspend
+ * call.
+ */
+#define SUSPEND_DELAY			(CONFIG_HZ * 2)
+
+/*
+ * RESUME_DELAY prevents that CPUs get immediately onlined after a resume
+ * call.
+ */
 #define RESUME_DELAY			(CONFIG_HZ / 10)
 
-/* Worker stuff */
 static struct workqueue_struct *apq_hotplug_wq;
 static struct delayed_work offline_all_work;
 static struct delayed_work online_all_work;
 
-/* Sysfs stuff */
 static struct kobject *apq_hotplug_kobj;
 
-/* Hotplug variables */
 static unsigned int boot_flag = BOOT_FLAG;
 static unsigned int suspend_delay = SUSPEND_DELAY;
 static unsigned int resume_delay = RESUME_DELAY;
@@ -69,7 +77,7 @@ static inline void offline_all_fn(struct work_struct *work)
 	for_each_online_cpu(cpu) {
 		if (cpu != 0) {
 			cpu_down(cpu);
-#ifdef DEBUG
+#if DEBUG
 			pr_info("CPU%u down.\n", cpu);
 			pr_info("CPU(s) running: %u\n", num_online_cpus());
 #endif
@@ -85,7 +93,7 @@ static inline void online_all_fn(struct work_struct *work)
 		if (cpu == 0)
 			continue;
 		cpu_up(cpu);
-#ifdef DEBUG
+#if DEBUG
 		pr_info("CPU%u up.\n", cpu);
 		pr_info("CPU(s) running: %u\n", num_online_cpus());
 #endif
@@ -188,7 +196,7 @@ static int __init apq_hotplug_init(void)
 
 	pr_info("initialized!\n");
 
-#ifdef DEBUG
+#if DEBUG
 	pr_info("CPUs running: %u\n", num_online_cpus());
 #endif
 

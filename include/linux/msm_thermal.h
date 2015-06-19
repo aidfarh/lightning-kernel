@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,13 +14,13 @@
 #ifndef __MSM_THERMAL_H
 #define __MSM_THERMAL_H
 
-#include <asm/cputime.h>
-
 extern unsigned int thermal_throttled;
 
 struct msm_thermal_data {
 	uint32_t sensor_id;
 	uint32_t poll_ms;
+	uint32_t low_poll_ms;
+	uint32_t mid_max_poll_ms;
 	uint32_t shutdown_temp;
 
 	uint32_t allowed_max_high;
@@ -36,27 +36,18 @@ struct msm_thermal_data {
 	uint32_t allowed_low_freq;
 };
 
-struct msm_thermal_stat {
-    cputime64_t time_low_start;
-    cputime64_t time_mid_start;
-    cputime64_t time_max_start;
-    cputime64_t time_low;
-    cputime64_t time_mid;
-    cputime64_t time_max;
-};
-
-#ifdef CONFIG_THERMAL_MONITOR
-extern int msm_thermal_init(struct msm_thermal_data *pdata);
-extern int msm_thermal_device_init(void);
-#else
-static inline int msm_thermal_init(struct msm_thermal_data *pdata)
-{
-	return -ENOSYS;
-}
-static inline int msm_thermal_device_init(void)
-{
-	return -ENOSYS;
-}
+#ifdef CONFIG_THERMAL_MONITOR		
+extern int msm_thermal_init(struct msm_thermal_data *pdata);		
+extern int msm_thermal_device_init(void);		
+#else		
+-static inline int msm_thermal_init(struct msm_thermal_data *pdata)		
+{		
+	return -ENOSYS;		
+}		
+static inline int msm_thermal_device_init(void)		
+{		
+	return -ENOSYS;		
+}		
 #endif
 
 #endif /*__MSM_THERMAL_H*/

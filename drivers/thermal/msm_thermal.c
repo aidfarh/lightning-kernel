@@ -187,8 +187,6 @@ static void check_temp(struct work_struct *work)
 			msecs_to_jiffies(msm_thermal_info.mid_max_poll_ms));
 		break;
 	}
-
-	return;
 }
 
 /******************************** SYSFS START ********************************/
@@ -448,7 +446,7 @@ static struct attribute_group msm_thermal_attr_group = {
 
 int __devinit msm_thermal_init(struct msm_thermal_data *pdata)
 {
-	int ret = 0, rc = 0;
+	int rc = 0;
 
 	if (!pdata || pdata->sensor_id >= TSENS_MAX_SENSORS)
 		return -EINVAL;
@@ -475,10 +473,11 @@ int __devinit msm_thermal_init(struct msm_thermal_data *pdata)
 	rc = sysfs_create_group(msm_thermal_kobject, &msm_thermal_attr_group);
 	if (rc) {
 		pr_err("sysfs group creation failed!");
-		return -ENOMEM;
+		kobject_put(msm_thermal_kobject);
+		return rc;
 	}
 
-	return ret;
+	return 0;
 }
 
 static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)

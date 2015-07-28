@@ -48,10 +48,10 @@ struct gpu_thresh_tbl {
 }
 
 static struct gpu_thresh_tbl thresh_tbl[] = {
-	GPU_SCALE(120,	65),
-	GPU_SCALE(110,	55),
-	GPU_SCALE(90,	45),
-	GPU_SCALE(80,	15),
+	GPU_SCALE(110,	60),
+	GPU_SCALE(95,	50),
+	GPU_SCALE(90,	50),
+	GPU_SCALE(80,	0),
 	GPU_SCALE(100,	0),
 };
 

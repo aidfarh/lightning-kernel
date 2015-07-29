@@ -16,8 +16,8 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/io.h>
-#include <linux/spinlock.h>
 #include <linux/stat.h>
+#include <linux/mutex.h>
 #include <mach/socinfo.h>
 #include <mach/scm.h>
 
@@ -25,34 +25,66 @@
 #include "kgsl_pwrscale.h"
 #include "kgsl_device.h"
 
-/* Print conservative stats */
+/*
+ * Without locking i discovered that conservative switches frequencies
+ * randomly at times, meaning that it up/downscales even if the load
+ * does not reach/cross the corresponding threshold.
+ */
+static DEFINE_MUTEX(conservative_policy_mutex);
+
+/*
+ * KGSL policy scaling mode.
+ * Energy saving locks the active pwrlevel to the highest present.
+ * Performance locks the active pwrlevel to the lowest present.
+ */ 
+static unsigned char mode[] = { 
+	'C',	/* Conservative */
+	'E',	/* Energy saving */
+	'P'	/* Performance */
+};
+
+static unsigned char scale_mode;
+
+/*
+ * Print conservative stats.
+ * default (0): disabled, 1: enabled
+ * Warning: Causes additional overhead and microlags on low polling intervals.
+ */
 static unsigned int g_show_stats;
 
-/* Polling interval in us */
+/*
+ * Polling interval in us.
+ */
 #define MIN_POLL_INTERVAL	10000
+#define POLL_INTERVAL		100000
 #define MAX_POLL_INTERVAL	1000000
 
-static unsigned long g_polling_interval = 100000;
+static unsigned long g_polling_interval = POLL_INTERVAL;
 
+/*
+ * Total and busytime stats used to calculate the current GPU load.
+ */
 static unsigned long walltime_total;
 static unsigned long busytime_total;
 
-struct gpu_thresh_tbl {
-	const unsigned int up_threshold;
-	const unsigned int down_threshold;
+/*
+ * Load thresholds.
+ * Array position references to the number of the pwrlevel.
+ */
+static unsigned int up_thresholds[] = {
+	110,	/* 400 MHz */
+	98,	/* 320 MHz */
+	90,	/* 200 MHz */
+	75,	/* 128 MHz */
+	100	/*  27 MHz */
 };
 
-#define GPU_SCALE(u, d) { \
-	.up_threshold = u, \
-	.down_threshold = d, \
-}
-
-static struct gpu_thresh_tbl thresh_tbl[] = {
-	GPU_SCALE(110,	60),
-	GPU_SCALE(95,	50),
-	GPU_SCALE(90,	50),
-	GPU_SCALE(80,	0),
-	GPU_SCALE(100,	0),
+static unsigned int down_thresholds[] = {
+	60,	/* 400 MHz */
+	45,	/* 320 MHz */
+	45,	/* 200 MHz */
+	0,	/* 128 MHz */
+	0	/*  27 MHz */
 };
 
 static void conservative_wake(struct kgsl_device *device,
@@ -63,10 +95,8 @@ static void conservative_wake(struct kgsl_device *device,
 	if (g_show_stats)
 		pr_info("%s: GPU waking up\n", __func__);
 
-	if (device->state != KGSL_STATE_NAP) {
-		kgsl_pwrctrl_pwrlevel_change(device,
-			device->pwrctrl.default_pwrlevel);
-		/* Reset the power stats counters */
+	if (device->state != KGSL_STATE_NAP && scale_mode == mode[0]) {
+		/* Reset the power stats counters. */
 		device->ftbl->power_stats(device, &stats);
 		walltime_total = 0;
 		busytime_total = 0;
@@ -83,8 +113,11 @@ static void conservative_idle(struct kgsl_device *device,
 
 	device->ftbl->power_stats(device, &stats);
 
-	if (!stats.total_time)
+	if (!stats.total_time ||
+		scale_mode == mode[1] || scale_mode == mode[2])
 		return;
+
+	mutex_lock(&conservative_policy_mutex);
 
 	walltime_total += (unsigned long) stats.total_time;
 	busytime_total += (unsigned long) stats.busy_time;
@@ -102,10 +135,9 @@ static void conservative_idle(struct kgsl_device *device,
 
 		walltime_total = busytime_total = 0;
 
-		if (loadpct < thresh_tbl[pwr->active_pwrlevel].down_threshold)
+		if (loadpct < down_thresholds[pwr->active_pwrlevel])
 			val = 1;
-		else if (loadpct >
-			thresh_tbl[pwr->active_pwrlevel].up_threshold)
+		else if (loadpct > up_thresholds[pwr->active_pwrlevel])
 			val = -1;
 
 		if (g_show_stats)
@@ -116,6 +148,8 @@ static void conservative_idle(struct kgsl_device *device,
 			kgsl_pwrctrl_pwrlevel_change(device,
 			pwr->active_pwrlevel + val);
 	}
+
+	mutex_unlock(&conservative_policy_mutex);
 }
 
 static void conservative_busy(struct kgsl_device *device,
@@ -127,8 +161,14 @@ static void conservative_busy(struct kgsl_device *device,
 static void conservative_sleep(struct kgsl_device *device,
 				struct kgsl_pwrscale *pwrscale)
 {
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+
 	if (g_show_stats)
 		pr_info("%s: GPU going to sleep\n", __func__);
+
+	/* Bring GPU frequency all the way down on sleep */
+	if (scale_mode != mode[2] && pwr->active_pwrlevel != pwr->min_pwrlevel)
+		kgsl_pwrctrl_pwrlevel_change(device, pwr->min_pwrlevel);
 }
 
 static ssize_t conservative_stats_show(struct kgsl_device *device,
@@ -201,9 +241,125 @@ PWRSCALE_POLICY_ATTR(polling_interval, S_IRUGO | S_IWUSR,
 					conservative_polling_interval_show,
 					conservative_polling_interval_store);
 
+static ssize_t down_thresholds_show(struct kgsl_device *device,
+				struct kgsl_pwrscale *pwrscale,
+				char *buf)
+{
+	int count;
+
+	count = snprintf(buf, PAGE_SIZE, "%u %u %u %u %u\n",
+					down_thresholds[0],
+					down_thresholds[1],
+					down_thresholds[2],
+					down_thresholds[3],
+					down_thresholds[4]);
+
+	return count;
+}
+
+static ssize_t down_thresholds_store(struct kgsl_device *device,
+				struct kgsl_pwrscale *pwrscale,
+				const char *buf, size_t count)
+{
+	int ret;
+
+	ret = sscanf(buf, "%u %u %u %u %u",
+					&down_thresholds[0],
+					&down_thresholds[1],
+					&down_thresholds[2],
+					&down_thresholds[3],
+					&down_thresholds[4]);
+
+	if (ret < 1 || ret > 5)
+		return -EINVAL;
+
+	return count;
+}
+
+PWRSCALE_POLICY_ATTR(pwrlevel_down_thresholds, S_IRUGO | S_IWUSR,
+							down_thresholds_show,
+							down_thresholds_store);
+
+static ssize_t up_thresholds_show(struct kgsl_device *device,
+				struct kgsl_pwrscale *pwrscale,
+				char *buf)
+{
+	int count;
+
+	count = snprintf(buf, PAGE_SIZE, "%u %u %u %u %u\n",
+					up_thresholds[0],
+					up_thresholds[1],
+					up_thresholds[2],
+					up_thresholds[3],
+					up_thresholds[4]);
+
+	return count;
+}
+
+static ssize_t up_thresholds_store(struct kgsl_device *device,
+				struct kgsl_pwrscale *pwrscale,
+				const char *buf, size_t count)
+{
+	int ret;
+
+	ret = sscanf(buf, "%u %u %u %u %u",
+					&up_thresholds[0],
+					&up_thresholds[1],
+					&up_thresholds[2],
+					&up_thresholds[3],
+					&up_thresholds[4]);
+
+	if (ret < 1 || ret > 5)
+		return -EINVAL;
+
+	return count;
+}
+
+PWRSCALE_POLICY_ATTR(pwrlevel_up_thresholds, S_IRUGO | S_IWUSR,
+							up_thresholds_show,
+							up_thresholds_store);
+
+static ssize_t scale_mode_show(struct kgsl_device *device,
+				struct kgsl_pwrscale *pwrscale,
+				char *buf)
+{
+	int count;
+
+	count = snprintf(buf, PAGE_SIZE, "%c\n", scale_mode);
+
+	return count;
+}
+
+static ssize_t scale_mode_store(struct kgsl_device *device,
+				struct kgsl_pwrscale *pwrscale,
+				const char *buf, size_t size)
+{
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+
+	if (sysfs_streq(buf, "C"))
+		scale_mode = mode[0];
+	else if (sysfs_streq(buf, "E")) {
+		scale_mode = mode[1];
+		kgsl_pwrctrl_pwrlevel_change(device, pwr->min_pwrlevel);
+	} else if (sysfs_streq(buf, "P")) {
+		scale_mode = mode[2];
+		kgsl_pwrctrl_pwrlevel_change(device, pwr->max_pwrlevel);
+	} else
+		return -EINVAL;
+
+	return strnlen(buf, PAGE_SIZE);
+}
+
+PWRSCALE_POLICY_ATTR(policy_scale_mode, S_IRUGO | S_IWUSR,
+							scale_mode_show,
+							scale_mode_store);
+
 static struct attribute *conservative_attrs[] = {
 	&policy_attr_print_stats.attr,
 	&policy_attr_polling_interval.attr,
+	&policy_attr_pwrlevel_down_thresholds.attr,
+	&policy_attr_pwrlevel_up_thresholds.attr,
+	&policy_attr_policy_scale_mode.attr,
 	NULL,
 };
 
@@ -217,6 +373,8 @@ static int conservative_init(struct kgsl_device *device,
 {
 	kgsl_pwrscale_policy_add_files(device, pwrscale,
 						&conservative_attr_group);
+
+	scale_mode = mode[0];
 
 	return 0;
 }

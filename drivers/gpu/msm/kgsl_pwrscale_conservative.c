@@ -14,16 +14,12 @@
 
 #include <linux/export.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
-#include <linux/io.h>
 #include <linux/stat.h>
 #include <linux/mutex.h>
-#include <mach/socinfo.h>
-#include <mach/scm.h>
 
 #include "kgsl.h"
-#include "kgsl_pwrscale.h"
 #include "kgsl_device.h"
+#include "kgsl_pwrscale.h"
 
 /*
  * Without locking i discovered that conservative switches frequencies
@@ -75,14 +71,14 @@ static unsigned int up_thresholds[] = {
 	110,	/* 400 MHz */
 	98,	/* 320 MHz */
 	90,	/* 200 MHz */
-	75,	/* 128 MHz */
+	45,	/* 128 MHz */
 	100	/*  27 MHz */
 };
 
 static unsigned int down_thresholds[] = {
 	60,	/* 400 MHz */
 	45,	/* 320 MHz */
-	45,	/* 200 MHz */
+	20,	/* 200 MHz */
 	0,	/* 128 MHz */
 	0	/*  27 MHz */
 };
@@ -117,8 +113,6 @@ static void conservative_idle(struct kgsl_device *device,
 		scale_mode == mode[1] || scale_mode == mode[2])
 		return;
 
-	mutex_lock(&conservative_policy_mutex);
-
 	walltime_total += (unsigned long) stats.total_time;
 	busytime_total += (unsigned long) stats.busy_time;
 
@@ -135,6 +129,8 @@ static void conservative_idle(struct kgsl_device *device,
 
 		walltime_total = busytime_total = 0;
 
+		mutex_lock(&conservative_policy_mutex);
+
 		if (loadpct < down_thresholds[pwr->active_pwrlevel])
 			val = 1;
 		else if (loadpct > up_thresholds[pwr->active_pwrlevel])
@@ -147,9 +143,9 @@ static void conservative_idle(struct kgsl_device *device,
 		if (val)
 			kgsl_pwrctrl_pwrlevel_change(device,
 			pwr->active_pwrlevel + val);
-	}
 
-	mutex_unlock(&conservative_policy_mutex);
+		mutex_unlock(&conservative_policy_mutex);
+	}
 }
 
 static void conservative_busy(struct kgsl_device *device,

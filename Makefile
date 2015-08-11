@@ -374,6 +374,7 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
                    -Wno-maybe-uninitialized \
 		   -Wno-format-security \
 		   -fno-delete-null-pointer-checks \
+		   -Wno-aggressive-loop-optimizations \
 		   -march=armv7ve -mcpu=cortex-a15
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=

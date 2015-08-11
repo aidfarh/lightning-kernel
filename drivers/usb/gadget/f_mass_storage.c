@@ -555,6 +555,7 @@ static int fsg_set_halt(struct fsg_dev *fsg, struct usb_ep *ep)
 /* Caller must hold fsg->lock */
 static void wakeup_thread(struct fsg_common *common)
 {
+	smp_wmb();	/* ensure the write of bh->state is complete */
 	/* Tell the main thread that something has happened */
 	common->thread_wakeup_needed = 1;
 	if (common->thread_task)
@@ -774,6 +775,7 @@ static int sleep_thread(struct fsg_common *common)
 	}
 	__set_current_state(TASK_RUNNING);
 	common->thread_wakeup_needed = 0;
+	smp_rmb();	/* ensure the latest bh->state is visible */
 	return rc;
 }
 
@@ -817,17 +819,12 @@ static int do_read(struct fsg_common *common)
 		curlun->sense_data = SS_LOGICAL_BLOCK_ADDRESS_OUT_OF_RANGE;
 		return -EINVAL;
 	}
-	if (curlun->cdrom)
-		file_offset = ((loff_t) lba) << 11;
-	else
-		file_offset = ((loff_t) lba) << curlun->blkbits;
+	file_offset = ((loff_t) lba) << curlun->blkbits;
 
 	/* Carry out the file reads */
 	amount_left = common->data_size_from_cmnd;
 	if (unlikely(amount_left == 0))
 		return -EIO;		/* No default reply */
-	if (curlun->cdrom)
-		amount_left <<= 2;
 
 	for (;;) {
 		/*
@@ -946,7 +943,6 @@ static int do_write(struct fsg_common *common)
 
 #ifdef CONFIG_USB_MSC_PROFILING
 	ktime_t			start, diff;
-	unsigned int		record_time, r_count, wb_size;
 #endif
 	if (curlun->ro) {
 		curlun->sense_data = SS_WRITE_PROTECTED;
@@ -992,32 +988,16 @@ static int do_write(struct fsg_common *common)
 	amount_left_to_req = common->data_size_from_cmnd;
 	amount_left_to_write = common->data_size_from_cmnd;
 
-	if (curlun->random_write_count >=
-				curlun->random_write_count_to_be_flushed ||
-		curlun->writeback_size >=
-				curlun->writeback_size_to_be_flushued) {
-#ifdef CONFIG_USB_MSC_PROFILING
-		r_count = curlun->random_write_count;
-		wb_size = curlun->writeback_size;
-		start = ktime_get();
-#endif
+	if (curlun->random_write_count >= RANDOM_WRITE_COUNT_TO_BE_FLUSHED)
 		fsg_lun_fsync_sub(curlun);
-#ifdef CONFIG_USB_MSC_PROFILING
-		record_time = (unsigned int)
-			ktime_to_ms(ktime_sub(ktime_get(), start));
-		add_worst_record(curlun, record_time, r_count, wb_size);
-		/* fsync_sub(): [ms] [n] [Bytes] */
-		LDBG(curlun, "[PROF] vfs_fsync(): %5u %2d %9u\n",
-			record_time, r_count, wb_size);
-#endif
-	}
 
 	/* Detect non-sequential write */
 	if (curlun->last_offset != file_offset)
 		curlun->random_write_count++;
+	else if (curlun->random_write_count)
+		curlun->random_write_count--;
 
 	curlun->last_offset = file_offset + amount_left_to_write;
-	curlun->writeback_size += amount_left_to_write;
 
 	while (amount_left_to_write > 0) {
 
@@ -1125,11 +1105,6 @@ static int do_write(struct fsg_common *common)
 			curlun->perf.wbytes += nwritten;
 			curlun->perf.wtime =
 					ktime_add(curlun->perf.wtime, diff);
-			record_time = (unsigned int)ktime_to_ms(diff);
-			if (add_worst_record(curlun, record_time, 0, nwritten))
-				LDBG(curlun,
-					"[PROF] vfs_write(): %5u %2d %5u\n",
-					record_time, 0, nwritten);
 #endif
 			if (signal_pending(current))
 				return -EINTR;		/* Interrupted! */
@@ -1510,7 +1485,7 @@ static int do_read_capacity(struct fsg_common *common, struct fsg_buffhd *bh)
 
 	put_unaligned_be32(curlun->num_sectors - 1, &buf[0]);
 						/* Max logical block */
-	put_unaligned_be32(curlun->cdrom ? 2048 : curlun->blksize, &buf[4]);/* Block length */
+	put_unaligned_be32(curlun->blksize, &buf[4]);/* Block length */
 	return 8;
 }
 
@@ -1788,7 +1763,7 @@ static int do_read_format_capacities(struct fsg_common *common,
 
 	put_unaligned_be32(curlun->num_sectors, &buf[0]);
 						/* Number of blocks */
-	put_unaligned_be32(curlun->cdrom ? 2048 : curlun->blksize, &buf[4]);/* Block length */
+	put_unaligned_be32(curlun->blksize, &buf[4]);/* Block length */
 	buf[4] = 0x02;				/* Current capacity */
 	return 12;
 }
@@ -2184,9 +2159,7 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 		return -EINVAL;
 	}
 
-	/* Check that only command bytes listed in the mask are non-zero 
-	 * Some BIOSes put some non-zero values in READ_TOC requests in 
-	 * the last two bytes */
+	/* Check that only command bytes listed in the mask are non-zero */
 	common->cmnd[1] &= 0x1f;			/* Mask away the LUN */
 	for (i = 1; i < cmnd_size; ++i) {
 		if (common->cmnd[i] && !(mask & (1 << i))) {
@@ -2366,7 +2339,7 @@ static int do_scsi_command(struct fsg_common *common)
 		common->data_size_from_cmnd =
 			get_unaligned_be16(&common->cmnd[7]);
 		reply = check_command(common, 10, DATA_DIR_TO_HOST,
-				      (0xf<<6) | (1<<1), 1,
+				      (7<<6) | (1<<1), 1,
 				      "READ TOC");
 		if (reply == 0)
 			reply = do_read_toc(common, bh);
@@ -2996,6 +2969,7 @@ static int fsg_main_thread(void *common_)
 
 
 /*************************** DEVICE ATTRIBUTES ***************************/
+
 /* Write permission is checked per LUN in store_*() functions. */
 static DEVICE_ATTR(ro, 0644, fsg_show_ro, fsg_store_ro);
 static DEVICE_ATTR(nofua, 0644, fsg_show_nofua, fsg_store_nofua);
@@ -3003,12 +2977,6 @@ static DEVICE_ATTR(file, 0644, fsg_show_file, fsg_store_file);
 static DEVICE_ATTR(cdrom, 0644, fsg_show_cdrom, fsg_store_cdrom);
 #ifdef CONFIG_USB_MSC_PROFILING
 static DEVICE_ATTR(perf, 0644, fsg_show_perf, fsg_store_perf);
-static DEVICE_ATTR(random_write_count_to_be_flushed, 0644, fsg_show_rndwcnt,
-							fsg_store_rndwcnt);
-static DEVICE_ATTR(writeback_size_to_be_flushued, 0644, fsg_show_wbsize,
-							fsg_store_wbsize);
-static DEVICE_ATTR(worst_record, 0644,	fsg_show_worstrecord,
-					fsg_store_worstrecord);
 #endif
 
 /****************************** FSG COMMON ******************************/
@@ -3116,11 +3084,6 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 		curlun->nofua = lcfg->nofua;
 		curlun->dev.release = fsg_lun_release;
 		curlun->dev.parent = &gadget->dev;
-		curlun->random_write_count_to_be_flushed =
-					RANDOM_WRITE_COUNT_TO_BE_FLUSHED;
-		curlun->writeback_size_to_be_flushued =
-					WRITEBACK_SIZE_TO_BE_FLUSHED;
-
 		/* curlun->dev.driver = &fsg_driver.driver; XXX */
 		dev_set_drvdata(&curlun->dev, &common->filesem);
 		dev_set_name(&curlun->dev,
@@ -3149,27 +3112,11 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 		rc = device_create_file(&curlun->dev, &dev_attr_cdrom);
 		if (rc)
 			goto error_luns;
-
 #ifdef CONFIG_USB_MSC_PROFILING
 		rc = device_create_file(&curlun->dev, &dev_attr_perf);
 		if (rc)
 			dev_err(&gadget->dev, "failed to create sysfs entry:"
 				"(dev_attr_perf) error: %d\n", rc);
-		rc = device_create_file(&curlun->dev,
-				&dev_attr_random_write_count_to_be_flushed);
-		if (rc)
-			dev_err(&gadget->dev, "failed to create sysfs entry:"\
-				"(dev_attr_perf) error: %d\n", rc);
-		rc = device_create_file(&curlun->dev,
-				&dev_attr_writeback_size_to_be_flushued);
-		if (rc)
-			dev_err(&gadget->dev, "failed to create sysfs entry:"\
-				"(dev_attr_perf) error: %d\n", rc);
-		rc = device_create_file(&curlun->dev,
-				&dev_attr_worst_record);
-		if (rc)
-			dev_err(&gadget->dev, "failed to create sysfs entry:"\
-				"(dev_attr_worst_record) error: %d\n", rc);
 #endif
 		if (lcfg->filename) {
 			rc = fsg_lun_open(curlun, lcfg->filename);
@@ -3309,17 +3256,12 @@ static void fsg_common_release(struct kref *ref)
 		/* In error recovery common->nluns may be zero. */
 		for (; i; --i, ++lun) {
 #ifdef CONFIG_USB_MSC_PROFILING
-			device_remove_file(&lun->dev, &dev_attr_worst_record);
-			device_remove_file(&lun->dev,
-				&dev_attr_writeback_size_to_be_flushued);
-			device_remove_file(&lun->dev,
-				&dev_attr_random_write_count_to_be_flushed);
 			device_remove_file(&lun->dev, &dev_attr_perf);
 #endif
+			device_remove_file(&lun->dev, &dev_attr_cdrom);
 			device_remove_file(&lun->dev, &dev_attr_nofua);
 			device_remove_file(&lun->dev, &dev_attr_ro);
 			device_remove_file(&lun->dev, &dev_attr_file);
-			device_remove_file(&lun->dev, &dev_attr_cdrom);
 			fsg_lun_close(lun);
 			kfree(lun->lun_filename);
 			lun->lun_filename = NULL;

@@ -226,30 +226,34 @@ static ssize_t thresholds_store(struct kgsl_device *device,
 				struct kgsl_pwrscale *pwrscale,
 				const char *buf, size_t count)
 {
+	unsigned int uval[5], dval[5];
 	int i, ret;
 
 	ret = sscanf(buf, "%u %u %u %u %u %u %u %u %u %u",
-					&thresholds[0].up_threshold,
-					&thresholds[0].down_threshold,
-					&thresholds[1].up_threshold,
-					&thresholds[1].down_threshold,
-					&thresholds[2].up_threshold,
-					&thresholds[2].down_threshold,
-					&thresholds[3].up_threshold,
-					&thresholds[3].down_threshold,
-					&thresholds[4].up_threshold,
-					&thresholds[4].down_threshold);
+					&uval[0],
+					&dval[0],
+					&uval[1],
+					&dval[1],
+					&uval[2],
+					&dval[2],
+					&uval[3],
+					&dval[3],
+					&uval[4],
+					&dval[4]);
 
 	if (ret < 1 || ret > 10)
 		return -EINVAL;
 
-	/*
-	 * Limit up_threshold to 98.
-	 * Anything higher will prevent downscaling a pwrlevel.
-	 */
-	for (i = 1; i < 6; i++) {
-		if (thresholds[i].up_threshold > MAX_LOAD)
-			thresholds[i].up_threshold = MAX_LOAD;
+	for (i = 0; i < 5; i++) {
+		/*
+	 	 * Limit up_threshold to 98.
+		 * Anything higher will prevent downscaling a pwrlevel.
+	 	 */
+		if (uval[i] > MAX_LOAD)
+			uval[i] = MAX_LOAD;
+
+		thresholds[i].up_threshold = uval[i];
+		thresholds[i].down_threshold = dval[i];
 	}
 
 	return count;

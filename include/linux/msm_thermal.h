@@ -15,32 +15,18 @@
 #ifndef __MSM_THERMAL_H
 #define __MSM_THERMAL_H
 
-enum throttling_status {
-	UNTHROTTLED,
-	PHASE1,
-	PHASE2,
-	PHASE3,
-};
-
-extern enum throttling_status tstat;
-
 struct msm_thermal_data {
 	uint32_t sensor_id;
 	uint32_t poll_ms;
-	uint32_t low_poll_ms;
-	uint32_t mid_max_poll_ms;
+	uint32_t throttle_poll_ms;
 	uint32_t shutdown_temp;
 
-	uint32_t allowed_max_high;
-	uint32_t allowed_max_low;
-	uint32_t allowed_max_freq;
+	uint32_t allowed_high_temp;
+	uint32_t allowed_high_rel_temp;
+	uint32_t allowed_high_freq;
 
-	uint32_t allowed_mid_high;
-	uint32_t allowed_mid_low;
-	uint32_t allowed_mid_freq;
-
-	uint32_t allowed_low_high;
-	uint32_t allowed_low_low;
+	uint32_t allowed_low_temp;
+	uint32_t allowed_low_rel_temp;
 	uint32_t allowed_low_freq;
 };
 

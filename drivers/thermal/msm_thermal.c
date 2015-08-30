@@ -15,12 +15,9 @@
 
 #define pr_fmt(fmt) "msm_thermal: " fmt
 
-#include <linux/cpu.h>
 #include <linux/cpufreq.h>
-#include <linux/init.h>
-#include <linux/kernel.h>
+#include <linux/fs.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/msm_thermal.h>
 #include <linux/msm_tsens.h>
 #include <linux/of.h>
@@ -29,25 +26,34 @@
 #include <linux/workqueue.h>
 #include <mach/cpufreq.h>
 
-static DEFINE_MUTEX(shutdown_mutex);
+static DEFINE_SPINLOCK(thermal_lock);
+
+#define TSENS_FAILED_RESCHEDULE_MS	100
+
+enum throttling_status {
+	UNTHROTTLED,
+	PHASE1,
+	PHASE2,
+};
 
 enum throttling_status tstat;
 
 static struct msm_thermal_data msm_thermal_info;
+static struct workqueue_struct *msm_thermal_wq;
 static struct delayed_work check_temp_work;
-static struct workqueue_struct *check_temp_workq;
 static struct kobject *msm_thermal_kobject;
 
-static int update_cpu_max_freq(struct cpufreq_policy *cpu_policy,
-				int cpu, int max_freq)
+static unsigned int prev_tstat;
+
+static int update_max_freq(uint32_t cpu, uint32_t max_freq)
 {
 	int ret;
 
-	if (!cpu_policy)
-		return -EINVAL;
+	ret = msm_cpufreq_set_freq_limits(cpu, MSM_CPUFREQ_NO_LIMIT, max_freq);
+	if (ret)
+		return ret;
 
-	cpufreq_verify_within_limits(cpu_policy, cpu_policy->min, max_freq);
-	cpu_policy->user_policy.max = max_freq;
+	prev_tstat = tstat;
 
 	ret = cpufreq_update_policy(cpu);
 
@@ -56,216 +62,146 @@ static int update_cpu_max_freq(struct cpufreq_policy *cpu_policy,
 
 static void check_temp(struct work_struct *work)
 {
-	struct cpufreq_policy *cpu_policy = NULL;
 	struct tsens_device tsens_dev;
 	unsigned long temp;
-	uint32_t max_freq = 0;
-	unsigned int max_cpu_freq = 0;
-	bool update_policy = false, final_cpu = false;
-	int cpu, ret;
+	uint32_t i, max_freq = MSM_CPUFREQ_NO_LIMIT;
+	unsigned int sampling_rate;
+	int ret;
 
 	tsens_dev.sensor_num = msm_thermal_info.sensor_id;
 
 	ret = tsens_get_temp(&tsens_dev, &temp);
 	if (ret) {
-		pr_err("Failed to read TSENS sensor data\n");
-		queue_delayed_work(check_temp_workq, &check_temp_work,
-			msecs_to_jiffies(msm_thermal_info.mid_max_poll_ms));
+		pr_err("Failed to read TSENS sensor data!\n");
+		queue_delayed_work(msm_thermal_wq, &check_temp_work,
+				msecs_to_jiffies(TSENS_FAILED_RESCHEDULE_MS));
 		return;
 	}
 
-	/*
-	 * If temp exceeds msm_thermal_info.shutdown_temp, force a system
-	 * shutdown.
-	 */
 	if (temp >= msm_thermal_info.shutdown_temp) {
-		mutex_lock(&shutdown_mutex);
+		spin_lock(&thermal_lock);
 
-		pr_warn("Emergency shutdown!\n");
+		pr_warn("Emergency filesystem sync!\n");
+		emergency_sync();
+		pr_warn("Shutdown, temperature: %lu!\n", temp);
 		kernel_power_off();
 
-		mutex_unlock(&shutdown_mutex);
+		spin_unlock(&thermal_lock);
 	}
 
-	for_each_possible_cpu(cpu) {
-		update_policy = false;
+	if (temp >= msm_thermal_info.allowed_low_temp &&
+		temp < msm_thermal_info.allowed_high_temp &&
+		tstat == UNTHROTTLED) {
+		max_freq = msm_thermal_info.allowed_low_freq;
+		tstat = PHASE1;
+	} else if (temp < msm_thermal_info.allowed_low_temp &&
+		tstat > UNTHROTTLED) {
+		max_freq = MSM_CPUFREQ_NO_LIMIT;
+		tstat = UNTHROTTLED;
+	} else if (temp >= msm_thermal_info.allowed_high_temp &&
+		tstat < PHASE2) {
+		max_freq = msm_thermal_info.allowed_high_freq;
+		tstat = PHASE2;
+	} else if (temp < msm_thermal_info.allowed_high_rel_temp &&
+		tstat > PHASE1) {
+		max_freq = msm_thermal_info.allowed_low_freq;
+		tstat = PHASE1;
+	}
 
-		cpu_policy = cpufreq_cpu_get(cpu);
-		if (cpu_policy == 0)
-			continue;
-
-		if (tstat == UNTHROTTLED && cpu == 0)
-			max_cpu_freq = cpu_policy->max;
-
-		if (cpu == CONFIG_NR_CPUS - 1)
-			final_cpu = true;
-
-		if (temp >= msm_thermal_info.allowed_low_high &&
-			temp < msm_thermal_info.allowed_mid_high &&
-			tstat == UNTHROTTLED) {
-			max_freq = msm_thermal_info.allowed_low_freq;
-			update_policy = true;
-
-			if (final_cpu)
-				tstat = PHASE1;
-		} else if (temp < msm_thermal_info.allowed_low_low &&
-			tstat > UNTHROTTLED) {
-			if (max_cpu_freq == 0)
-				max_freq = CONFIG_MSM_CPU_FREQ_MAX;
-			else
-				max_freq = max_cpu_freq;
-
-			update_policy = true;
-
-			if (final_cpu)
-				tstat = UNTHROTTLED;
-		} else if (temp >= msm_thermal_info.allowed_mid_high &&
-			temp < msm_thermal_info.allowed_max_high &&
-			tstat < PHASE2) {
-			max_freq = msm_thermal_info.allowed_mid_freq;
-			update_policy = true;
-
-			if (final_cpu)
-				tstat = PHASE2;
-		} else if (temp < msm_thermal_info.allowed_mid_low &&
-						tstat > PHASE1) {
-			max_freq = msm_thermal_info.allowed_low_freq;
-			update_policy = true;
-
-			if (final_cpu)
-				tstat = PHASE1;
-		} else if (temp >= msm_thermal_info.allowed_max_high) {
-			max_freq = msm_thermal_info.allowed_max_freq;
-			update_policy = true;
-
-			if (final_cpu)
-				tstat = PHASE3;
-		} else if (temp < msm_thermal_info.allowed_max_low &&
-						tstat > PHASE2) {
-			max_freq = msm_thermal_info.allowed_mid_freq;
-			update_policy = true;
-
-			if (final_cpu)
-				tstat = PHASE2;
+	if (tstat != prev_tstat) {
+		for_each_possible_cpu(i) {
+			ret = update_max_freq(i, max_freq);
+			if (ret)
+				pr_err("Failed to limit max freq!\n");
 		}
-
-		if (update_policy)
-			update_cpu_max_freq(cpu_policy, cpu, max_freq);
-
-		cpufreq_cpu_put(cpu_policy);
 	}
 
-	/*
-	 * Dynamic polling - depending on the throttling state the polling
-	 * rate increases with rising temperature.
-	 */
 	switch (tstat) {
 	case UNTHROTTLED:
-		queue_delayed_work(check_temp_workq, &check_temp_work,
-			msecs_to_jiffies(msm_thermal_info.poll_ms));
+		sampling_rate = msm_thermal_info.poll_ms;
 		break;
-	case PHASE1:
-		queue_delayed_work(check_temp_workq, &check_temp_work,
-			msecs_to_jiffies(msm_thermal_info.low_poll_ms));
-		break;
-	case PHASE2 ... PHASE3:
-		queue_delayed_work(check_temp_workq, &check_temp_work,
-			msecs_to_jiffies(msm_thermal_info.mid_max_poll_ms));
+	default:
+		sampling_rate = msm_thermal_info.throttle_poll_ms;
 		break;
 	}
+
+	queue_delayed_work(msm_thermal_wq, &check_temp_work,
+					msecs_to_jiffies(sampling_rate));
 }
 
 /******************************** SYSFS START ********************************/
-#define show_one(file_name, object)						\
-static ssize_t show_##file_name							\
-(struct kobject *kobj, struct attribute *attr, char *buf)			\
-{										\
-	return snprintf(buf, PAGE_SIZE, "%u\n", msm_thermal_info.object);	\
+#define show_one(file_name, object)					\
+static ssize_t show_##file_name						\
+(struct kobject *kobj, struct attribute *attr, char *buf)		\
+{									\
+	return snprintf(buf, PAGE_SIZE, "%u\n", msm_thermal_info.object); \
 }
 
-#define store_one(file_name, object)					  	\
-static ssize_t store_##file_name						\
-(struct kobject *kobj, struct attribute *attr, const char *buf, size_t count)	\
-{										\
-	unsigned int input;							\
-	int ret;								\
-										\
-	ret = sscanf(buf, "%u", &input);					\
-	if (ret != 1)								\
-		return -EINVAL;							\
-										\
-	msm_thermal_info.object = input;					\
-										\
-	return count;								\
+#define store_one(file_name, object)					\
+static ssize_t store_##file_name					\
+(struct kobject *kobj, struct attribute *attr, const char *buf, size_t count) \
+{									\
+	unsigned int input;						\
+	int ret;							\
+									\
+	ret = sscanf(buf, "%u", &input);				\
+	if (ret != 1)							\
+		return -EINVAL;						\
+									\
+	msm_thermal_info.object = input;				\
+									\
+	return count;							\
 }
 
-#define global_attr_rw(_name)							\
-static struct global_attr _name =						\
+#define global_attr_rw(_name)						\
+static struct global_attr _name =					\
 __ATTR(_name, S_IRUGO | S_IWUSR, show_##_name, store_##_name)
 
 show_one(shutdown_temp, shutdown_temp);
-show_one(allowed_max_high, allowed_max_high);
-show_one(allowed_max_low, allowed_max_low);
-show_one(allowed_max_freq, allowed_max_freq);
-show_one(allowed_mid_high, allowed_mid_high);
-show_one(allowed_mid_low, allowed_mid_low);
-show_one(allowed_mid_freq, allowed_mid_freq);
-show_one(allowed_low_high, allowed_low_high);
-show_one(allowed_low_low, allowed_low_low);
+show_one(allowed_high_temp, allowed_high_temp);
+show_one(allowed_high_rel_temp, allowed_high_rel_temp);
+show_one(allowed_high_freq, allowed_high_freq);
+show_one(allowed_low_temp, allowed_low_temp);
+show_one(allowed_low_rel_temp, allowed_low_rel_temp);
 show_one(allowed_low_freq, allowed_low_freq);
+show_one(throttle_poll_ms, throttle_poll_ms);
 show_one(poll_ms, poll_ms);
-show_one(low_poll_ms, low_poll_ms);
-show_one(mid_max_poll_ms, mid_max_poll_ms);
 
 store_one(shutdown_temp, shutdown_temp);
-store_one(allowed_max_high, allowed_max_high);
-store_one(allowed_max_low, allowed_max_low);
-store_one(allowed_max_freq, allowed_max_freq);
-store_one(allowed_mid_high, allowed_mid_high);
-store_one(allowed_mid_low, allowed_mid_low);
-store_one(allowed_mid_freq, allowed_mid_freq);
-store_one(allowed_low_high, allowed_low_high);
-store_one(allowed_low_low, allowed_low_low);
+store_one(allowed_high_temp, allowed_high_temp);
+store_one(allowed_high_rel_temp, allowed_high_rel_temp);
+store_one(allowed_high_freq, allowed_high_freq);
+store_one(allowed_low_temp, allowed_low_temp);
+store_one(allowed_low_rel_temp, allowed_low_rel_temp);
 store_one(allowed_low_freq, allowed_low_freq);
+store_one(throttle_poll_ms, throttle_poll_ms);
 store_one(poll_ms, poll_ms);
-store_one(low_poll_ms, low_poll_ms);
-store_one(mid_max_poll_ms, mid_max_poll_ms);
 
 global_attr_rw(shutdown_temp);
-global_attr_rw(allowed_max_high);
-global_attr_rw(allowed_max_low);
-global_attr_rw(allowed_max_freq);
-global_attr_rw(allowed_mid_high);
-global_attr_rw(allowed_mid_low);
-global_attr_rw(allowed_mid_freq);
-global_attr_rw(allowed_low_high);
-global_attr_rw(allowed_low_low);
+global_attr_rw(allowed_high_temp);
+global_attr_rw(allowed_high_rel_temp);
+global_attr_rw(allowed_high_freq);
+global_attr_rw(allowed_low_temp);
+global_attr_rw(allowed_low_rel_temp);
 global_attr_rw(allowed_low_freq);
+global_attr_rw(throttle_poll_ms);
 global_attr_rw(poll_ms);
-global_attr_rw(low_poll_ms);
-global_attr_rw(mid_max_poll_ms);
 
 static struct attribute *msm_thermal_attributes[] = {
 	&shutdown_temp.attr,
-	&allowed_max_high.attr,
-	&allowed_max_low.attr,
-	&allowed_max_freq.attr,
-	&allowed_mid_high.attr,
-	&allowed_mid_low.attr,
-	&allowed_mid_freq.attr,
-	&allowed_low_high.attr,
-	&allowed_low_low.attr,
+	&allowed_high_temp.attr,
+	&allowed_high_rel_temp.attr,
+	&allowed_high_freq.attr,
+	&allowed_low_temp.attr,
+	&allowed_low_rel_temp.attr,
 	&allowed_low_freq.attr,
+	&throttle_poll_ms.attr,
 	&poll_ms.attr,
-	&low_poll_ms.attr,
-	&mid_max_poll_ms.attr,
 	NULL,
 };
 
-
 static struct attribute_group msm_thermal_attr_group = {
 	.attrs = msm_thermal_attributes,
-	.name = "conf",
 };
 /********************************* SYSFS END *********************************/
 
@@ -278,15 +214,15 @@ int __devinit msm_thermal_init(struct msm_thermal_data *pdata)
 
 	memcpy(&msm_thermal_info, pdata, sizeof(struct msm_thermal_data));
 
-	check_temp_workq = alloc_workqueue("msm_thermal",
+	msm_thermal_wq = alloc_workqueue("msm_thermal",
 					WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
-	if (!check_temp_workq) {
+	if (!msm_thermal_wq) {
 		pr_err("Workqueue allocation failed!");
 		return -ENOMEM;
 	}
 
 	INIT_DELAYED_WORK(&check_temp_work, check_temp);
-	queue_delayed_work(check_temp_workq, &check_temp_work, 0);
+	queue_delayed_work(msm_thermal_wq, &check_temp_work, 0);
 
 	msm_thermal_kobject = kobject_create_and_add("msm_thermal",
 							kernel_kobj);
@@ -301,6 +237,8 @@ int __devinit msm_thermal_init(struct msm_thermal_data *pdata)
 		kobject_put(msm_thermal_kobject);
 		return rc;
 	}
+
+	pr_info("Initialized!\n");
 
 	return 0;
 }
@@ -318,7 +256,7 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(node, key, &data.sensor_id);
 	if (ret)
 		goto fail;
-	if (data.sensor_id > TSENS_MAX_SENSORS) {
+	if (data.sensor_id >= TSENS_MAX_SENSORS) {
 		data.sensor_id = 7;
 		pr_warn("Tsens sensor-id out of range, defaulting to %u\n",
 							data.sensor_id);
@@ -329,13 +267,8 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
-	key = "qcom,low_poll-ms";
-	ret = of_property_read_u32(node, key, &data.low_poll_ms);
-	if (ret)
-		goto fail;
-
-	key = "qcom,mid_max_poll-ms";
-	ret = of_property_read_u32(node, key, &data.mid_max_poll_ms);
+	key = "qcom,throttle_poll-ms";
+	ret = of_property_read_u32(node, key, &data.throttle_poll_ms);
 	if (ret)
 		goto fail;
 
@@ -344,43 +277,28 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
-	key = "qcom,allowed_max_high";
-	ret = of_property_read_u32(node, key, &data.allowed_max_high);
+	key = "qcom,allowed_high_temp";
+	ret = of_property_read_u32(node, key, &data.allowed_high_temp);
 	if (ret)
 		goto fail;
 
-	key = "qcom,allowed_max_low";
-	ret = of_property_read_u32(node, key, &data.allowed_max_low);
+	key = "qcom,allowed_high_rel_temp";
+	ret = of_property_read_u32(node, key, &data.allowed_high_rel_temp);
 	if (ret)
 		goto fail;
 
-	key = "qcom,allowed_max_freq";
-	ret = of_property_read_u32(node, key, &data.allowed_max_freq);
+	key = "qcom,allowed_high_freq";
+	ret = of_property_read_u32(node, key, &data.allowed_high_freq);
 	if (ret)
 		goto fail;
 
-	key = "qcom,allowed_mid_high";
-	ret = of_property_read_u32(node, key, &data.allowed_mid_high);
+	key = "qcom,allowed_low_temp";
+	ret = of_property_read_u32(node, key, &data.allowed_low_temp);
 	if (ret)
 		goto fail;
 
-	key = "qcom,allowed_mid_low";
-	ret = of_property_read_u32(node, key, &data.allowed_mid_low);
-	if (ret)
-		goto fail;
-
-	key = "qcom,allowed_mid_freq";
-	ret = of_property_read_u32(node, key, &data.allowed_mid_freq);
-	if (ret)
-		goto fail;
-
-	key = "qcom,allowed_low_high";
-	ret = of_property_read_u32(node, key, &data.allowed_low_high);
-	if (ret)
-		goto fail;
-
-	key = "qcom,allowed_low_low";
-	ret = of_property_read_u32(node, key, &data.allowed_low_low);
+	key = "qcom,allowed_low_rel_temp";
+	ret = of_property_read_u32(node, key, &data.allowed_low_rel_temp);
 	if (ret)
 		goto fail;
 
@@ -391,11 +309,13 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 
 	msm_thermal_init(&data);
 
+	pr_info("Probed!\n");
+
 	return 0;
 
 fail:
 	pr_err("%s: Failed reading node=%s, key=%s\n",
-			__func__, node->full_name, key);
+					__func__, node->full_name, key);
 	return -EINVAL;
 }
 
@@ -418,4 +338,4 @@ int __init msm_thermal_device_init(void)
 	return platform_driver_register(&msm_thermal_device_driver);
 }
 
-fs_initcall(msm_thermal_device_init);
+late_initcall(msm_thermal_device_init);

@@ -26,7 +26,7 @@
 
 #include <linux/export.h>
 #include <linux/kernel.h>
-#include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/stat.h>
 
 #include "kgsl.h"
@@ -38,7 +38,7 @@
  * randomly at times, meaning that it up/downscales even if the load
  * does not reach/cross the corresponding threshold.
  */
-static DEFINE_MUTEX(conservative_policy_mutex);
+static DEFINE_SPINLOCK(conservative_lock);
 
 /*
  * KGSL policy scaling mode.
@@ -104,6 +104,7 @@ static void conservative_idle(struct kgsl_device *device,
 {
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 	struct kgsl_power_stats stats;
+	unsigned long flags;
 	unsigned int load_hist;
 	int val = 0;
 
@@ -130,7 +131,7 @@ static void conservative_idle(struct kgsl_device *device,
 		 * needs locking. Leave it to that to keep overhead
 		 * as low as possible.
 		 */
-		mutex_lock(&conservative_policy_mutex);
+		spin_lock_irqsave(&conservative_lock, flags);
 
 		if (load_hist < thresholds[pwr->active_pwrlevel].down_threshold)
 			val = 1;
@@ -138,11 +139,11 @@ static void conservative_idle(struct kgsl_device *device,
 			thresholds[pwr->active_pwrlevel].up_threshold)
 			val = -1;
 
+		spin_unlock_irqrestore(&conservative_lock, flags);
+
 		if (val)
 			kgsl_pwrctrl_pwrlevel_change(device,
 						pwr->active_pwrlevel + val);
-
-		mutex_unlock(&conservative_policy_mutex);
 	}
 }
 
